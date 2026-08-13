@@ -234,7 +234,17 @@ const createProduct = async (req, res) => {
 
 const getProducts = async (req, res) => {
   try {
-    const { category, featured, search, page = 1, limit = 12 } = req.query;
+    const {
+      category,
+      featured,
+      search,
+      stock_status,
+      min_price,
+      max_price,
+      sort = "featured",
+      page = 1,
+      limit = 12,
+    } = req.query;
 
     const safePage = Math.max(Number(page) || 1, 1);
     const safeLimit = Math.min(Math.max(Number(limit) || 12, 1), 50);
@@ -245,36 +255,102 @@ const getProducts = async (req, res) => {
       is_active: true,
     };
 
+    /*
+     * FEATURED
+     */
     if (featured === "true") {
       productWhere.is_featured = true;
     }
 
+    /*
+     * STOCK STATUS
+     */
+    if (
+      stock_status &&
+      ["IN_STOCK", "OUT_OF_STOCK", "ON_REQUEST"].includes(stock_status)
+    ) {
+      productWhere.stock_status = stock_status;
+    }
+
+    /*
+     * SEARCH
+     */
     if (search?.trim()) {
+      const searchValue = search.trim();
+
       productWhere[Op.or] = [
         {
           name: {
-            [Op.like]: `%${search.trim()}%`,
+            [Op.like]: `%${searchValue}%`,
           },
         },
+
         {
           sku: {
-            [Op.like]: `%${search.trim()}%`,
+            [Op.like]: `%${searchValue}%`,
           },
         },
+
         {
           short_description: {
-            [Op.like]: `%${search.trim()}%`,
+            [Op.like]: `%${searchValue}%`,
+          },
+        },
+
+        {
+          description: {
+            [Op.like]: `%${searchValue}%`,
+          },
+        },
+
+        {
+          material: {
+            [Op.like]: `%${searchValue}%`,
+          },
+        },
+
+        {
+          metal_color: {
+            [Op.like]: `%${searchValue}%`,
           },
         },
       ];
     }
 
+    /*
+     * PRICE RANGE
+     */
+    if (min_price || max_price) {
+      productWhere.price = {};
+
+      if (min_price !== undefined && min_price !== "") {
+        const min = Number(min_price);
+
+        if (!Number.isNaN(min)) {
+          productWhere.price[Op.gte] = min;
+        }
+      }
+
+      if (max_price !== undefined && max_price !== "") {
+        const max = Number(max_price);
+
+        if (!Number.isNaN(max)) {
+          productWhere.price[Op.lte] = max;
+        }
+      }
+    }
+
+    /*
+     * CATEGORY
+     */
     const categoryInclude = {
       model: Category,
       as: "categories",
+
       through: {
         attributes: [],
       },
+
       required: false,
     };
 
@@ -287,6 +363,42 @@ const getProducts = async (req, res) => {
       categoryInclude.required = true;
     }
 
+    /*
+     * SORT
+     */
+    let order = [];
+
+    switch (sort) {
+      case "newest":
+        order = [["created_at", "DESC"]];
+        break;
+
+      case "price_asc":
+        order = [
+          ["price", "ASC"],
+          ["created_at", "DESC"],
+        ];
+        break;
+
+      case "price_desc":
+        order = [
+          ["price", "DESC"],
+          ["created_at", "DESC"],
+        ];
+        break;
+
+      case "featured":
+      default:
+        order = [
+          ["is_featured", "DESC"],
+          ["created_at", "DESC"],
+        ];
+        break;
+    }
+
+    /*
+     * PRODUCT QUERY
+     */
     const { count, rows } = await Product.findAndCountAll({
       where: productWhere,
 
@@ -294,6 +406,15 @@ const getProducts = async (req, res) => {
         {
           model: ProductImage,
           as: "images",
+
+          /*
+           * Listing page only needs
+           * the primary image.
+           */
+          where: {
+            is_primary: true,
+          },
+
           required: false,
         },
 
@@ -305,10 +426,7 @@ const getProducts = async (req, res) => {
       limit: safeLimit,
       offset,
 
-      order: [
-        ["created_at", "DESC"],
-        [{ model: ProductImage, as: "images" }, "sort_order", "ASC"],
-      ],
+      order,
     });
 
     return res.status(200).json({
@@ -534,7 +652,6 @@ const updateProduct = async (req, res) => {
     }
 
     product.updated_by = req.user?.id || null;
-
 
     await product.save({
       transaction,

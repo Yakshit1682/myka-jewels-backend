@@ -43,45 +43,62 @@ const createInquiry = async (req, res) => {
       "Hello, I would like to inquire about this jewellery item.",
       "",
       `Product: ${product.name}`,
+
       product.sku ? `SKU: ${product.sku}` : null,
+
       product.price
         ? `Price: ₹${Number(product.price).toLocaleString("en-IN")}`
         : null,
+
       "",
       `Customer: ${customerName}`,
+
       req.user.phone ? `Phone: ${req.user.phone}` : null,
     ]
       .filter(Boolean)
       .join("\n");
 
+    /*
+     * Generate WhatsApp URL first
+     */
+    const whatsappUrl =
+      `https://wa.me/${whatsappNumber}` +
+      `?text=${encodeURIComponent(message)}`;
+
+    /*
+     * Store inquiry
+     */
     const inquiry = await ProductInquiry.create({
       user_id: req.user.id,
+
       product_id: product.id,
 
       customer_name: customerName || null,
+
       customer_email: req.user.email || null,
+
       customer_phone: req.user.phone || null,
 
       inquiry_message: message,
 
-      whatsapp_number: whatsappNumber,
+      shop_whatsapp_number: whatsappNumber,
+
+      whatsapp_url: whatsappUrl,
 
       status: "CLICKED",
 
       clicked_at: new Date(),
     });
 
-    const whatsappUrl =
-      `https://wa.me/${whatsappNumber}` +
-      `?text=${encodeURIComponent(message)}`;
-
     return res.status(201).json({
       success: true,
+
       message: "Inquiry recorded successfully",
 
       data: {
         inquiry_uuid: inquiry.uuid,
-        whatsapp_url: whatsappUrl,
+
+        whatsapp_url: inquiry.whatsapp_url,
       },
     });
   } catch (error) {

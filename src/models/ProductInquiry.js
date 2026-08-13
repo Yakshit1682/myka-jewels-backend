@@ -28,12 +28,12 @@ const ProductInquiry = sequelize.define(
     },
 
     customer_name: {
-      type: DataTypes.STRING(150),
+      type: DataTypes.STRING(200),
       allowNull: true,
     },
 
     customer_email: {
-      type: DataTypes.STRING(191),
+      type: DataTypes.STRING(190),
       allowNull: true,
     },
 
@@ -47,9 +47,14 @@ const ProductInquiry = sequelize.define(
       allowNull: false,
     },
 
-    whatsapp_number: {
+    shop_whatsapp_number: {
       type: DataTypes.STRING(30),
       allowNull: false,
+    },
+
+    whatsapp_url: {
+      type: DataTypes.TEXT,
+      allowNull: true,
     },
 
     status: {
@@ -58,20 +63,32 @@ const ProductInquiry = sequelize.define(
       defaultValue: "CLICKED",
     },
 
-    admin_notes: {
-      type: DataTypes.TEXT,
-      allowNull: true,
-    },
-
     clicked_at: {
       type: DataTypes.DATE,
       allowNull: false,
       defaultValue: DataTypes.NOW,
     },
+
+    contacted_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+
+    closed_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+
+    admin_notes: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
   },
   {
     tableName: "product_inquiries",
+
     timestamps: true,
+
     createdAt: "created_at",
     updatedAt: "updated_at",
   },
