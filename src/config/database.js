@@ -23,6 +23,12 @@ const sequelize = new Sequelize(
       underscored: true,
       freezeTableName: true,
     },
+    dialectOptions: {
+      ssl: {
+        minVersion: "TLSv1.2",
+        rejectUnauthorized: true,
+      },
+    },
   },
 );
 
