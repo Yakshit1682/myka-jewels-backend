@@ -24,7 +24,10 @@ const UserRole = sequelize.define(
     tableName: "user_roles",
     timestamps: true,
     createdAt: "created_at",
-    updatedAt: false,
+    updatedAt: "updated_at",
+    paranoid: true,
+    deletedAt: "deleted_at",
+    underscored: true,
   },
 );
 

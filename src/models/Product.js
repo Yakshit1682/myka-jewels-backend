@@ -107,6 +107,7 @@ const Product = sequelize.define(
 
     paranoid: true,
     deletedAt: "deleted_at",
+    underscored: true,
   },
 );
 

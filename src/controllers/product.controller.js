@@ -6,6 +6,7 @@ const {
   ProductCategory,
   ProductInquiry,
   Category,
+  Collection,
 } = require("../models");
 
 const sequelize = require("../config/database");
@@ -32,9 +33,15 @@ const createProduct = async (req, res) => {
       weight_grams,
       stock_status,
       is_featured,
-      category_uuids = [],
+
+      category_collections = [],
+
       images = [],
     } = req.body;
+
+    /*
+     * BASIC VALIDATION
+     */
 
     if (!name?.trim()) {
       await transaction.rollback();
@@ -45,12 +52,12 @@ const createProduct = async (req, res) => {
       });
     }
 
-    if (!Array.isArray(category_uuids)) {
+    if (!Array.isArray(category_collections)) {
       await transaction.rollback();
 
       return res.status(400).json({
         success: false,
-        message: "category_uuids must be an array",
+        message: "category_collections must be an array",
       });
     }
 
@@ -72,6 +79,37 @@ const createProduct = async (req, res) => {
       });
     }
 
+    /*
+     * VALIDATE CATEGORY / COLLECTION PAYLOAD
+     */
+
+    for (const item of category_collections) {
+      if (!item.category_uuid) {
+        await transaction.rollback();
+
+        return res.status(400).json({
+          success: false,
+          message: "category_uuid is required",
+        });
+      }
+
+      if (
+        item.collection_uuids !== undefined &&
+        !Array.isArray(item.collection_uuids)
+      ) {
+        await transaction.rollback();
+
+        return res.status(400).json({
+          success: false,
+          message: "collection_uuids must be an array",
+        });
+      }
+    }
+
+    /*
+     * VALIDATE IMAGES
+     */
+
     for (const image of images) {
       if (!isValidImageDataUri(image.data_uri)) {
         await transaction.rollback();
@@ -83,10 +121,17 @@ const createProduct = async (req, res) => {
       }
     }
 
+    /*
+     * CREATE SLUG
+     */
+
     let slug = createSlug(name);
 
     const existingSlug = await Product.findOne({
-      where: { slug },
+      where: {
+        slug,
+      },
+
       transaction,
     });
 
@@ -94,11 +139,16 @@ const createProduct = async (req, res) => {
       slug = `${slug}-${Date.now()}`;
     }
 
+    /*
+     * VALIDATE SKU
+     */
+
     if (sku) {
       const existingSku = await Product.findOne({
         where: {
           sku: sku.trim(),
         },
+
         transaction,
       });
 
@@ -112,9 +162,14 @@ const createProduct = async (req, res) => {
       }
     }
 
+    /*
+     * CREATE PRODUCT
+     */
+
     const product = await Product.create(
       {
         name: name.trim(),
+
         slug,
 
         sku: sku?.trim() || null,
@@ -146,17 +201,31 @@ const createProduct = async (req, res) => {
       },
     );
 
-    if (category_uuids.length > 0) {
+    /*
+     * CATEGORY + COLLECTION ASSIGNMENTS
+     */
+
+    if (category_collections.length > 0) {
+      /*
+       * Get all unique category UUIDs
+       */
+      const categoryUuids = [
+        ...new Set(category_collections.map((item) => item.category_uuid)),
+      ];
+
       const categories = await Category.findAll({
         where: {
           uuid: {
-            [Op.in]: category_uuids,
+            [Op.in]: categoryUuids,
           },
+
+          is_active: true,
         },
+
         transaction,
       });
 
-      if (categories.length !== category_uuids.length) {
+      if (categories.length !== categoryUuids.length) {
         await transaction.rollback();
 
         return res.status(400).json({
@@ -165,28 +234,123 @@ const createProduct = async (req, res) => {
         });
       }
 
-      await ProductCategory.bulkCreate(
-        categories.map((category) => ({
-          product_id: product.id,
-          category_id: category.id,
-        })),
-        {
+      /*
+       * Get all unique collection UUIDs
+       */
+      const collectionUuids = [
+        ...new Set(
+          category_collections.flatMap((item) => item.collection_uuids || []),
+        ),
+      ];
+
+      let collections = [];
+
+      if (collectionUuids.length > 0) {
+        collections = await Collection.findAll({
+          where: {
+            uuid: {
+              [Op.in]: collectionUuids,
+            },
+
+            is_active: true,
+          },
+
           transaction,
-        },
+        });
+
+        if (collections.length !== collectionUuids.length) {
+          await transaction.rollback();
+
+          return res.status(400).json({
+            success: false,
+            message: "One or more collections are invalid",
+          });
+        }
+      }
+
+      /*
+       * Map UUIDs to numeric database IDs
+       */
+
+      const categoryMap = new Map(
+        categories.map((category) => [category.uuid, category.id]),
       );
+
+      const collectionMap = new Map(
+        collections.map((collection) => [collection.uuid, collection.id]),
+      );
+
+      const productCategoryRows = [];
+
+      /*
+       * Build product_categories records
+       */
+
+      for (const item of category_collections) {
+        const categoryId = categoryMap.get(item.category_uuid);
+
+        const selectedCollections = [...new Set(item.collection_uuids || [])];
+
+        /*
+         * Category selected without any collection
+         */
+        if (selectedCollections.length === 0) {
+          productCategoryRows.push({
+            product_id: product.id,
+
+            category_id: categoryId,
+
+            collection_id: null,
+
+            is_primary: false,
+          });
+
+          continue;
+        }
+
+        /*
+         * Same category can have multiple collections
+         */
+        for (const collectionUuid of selectedCollections) {
+          productCategoryRows.push({
+            product_id: product.id,
+
+            category_id: categoryId,
+
+            collection_id: collectionMap.get(collectionUuid),
+
+            is_primary: false,
+          });
+        }
+      }
+
+      await ProductCategory.bulkCreate(productCategoryRows, {
+        transaction,
+      });
     }
+
+    /*
+     * PRODUCT IMAGES
+     */
 
     if (images.length > 0) {
       await ProductImage.bulkCreate(
         images.map((image, index) => ({
           product_id: product.id,
+
           data_uri: image.data_uri,
-          sort_order: image.sort_order ?? index,
+
+          sort_order:
+            Number(image.sort_order) >= 1
+              ? Number(image.sort_order)
+              : index + 1,
+
           is_primary:
             image.is_primary !== undefined
               ? Boolean(image.is_primary)
               : index === 0,
         })),
+
         {
           transaction,
         },
@@ -195,29 +359,59 @@ const createProduct = async (req, res) => {
 
     await transaction.commit();
 
+    /*
+     * FETCH CREATED PRODUCT
+     */
+
     const createdProduct = await Product.findByPk(product.id, {
       include: [
         {
           model: ProductImage,
           as: "images",
         },
+
         {
-          model: Category,
-          as: "categories",
-          through: {
-            attributes: [],
-          },
+          model: ProductCategory,
+          as: "product_categories",
+
+          attributes: ["id", "category_id", "collection_id", "is_primary"],
+
+          include: [
+            {
+              model: Category,
+              as: "category",
+
+              attributes: ["uuid", "name", "slug", "parent_id"],
+            },
+
+            {
+              model: Collection,
+              as: "collection",
+
+              attributes: ["uuid", "name", "slug"],
+
+              required: false,
+            },
+          ],
         },
       ],
     });
 
     return res.status(201).json({
       success: true,
+
       message: "Product created successfully",
+
       data: createdProduct,
     });
   } catch (error) {
-    await transaction.rollback();
+    /*
+     * Only rollback if transaction
+     * hasn't already been committed.
+     */
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
 
     console.error("Create product error:", error);
 
@@ -236,6 +430,7 @@ const getProducts = async (req, res) => {
   try {
     const {
       category,
+      collection,
       featured,
       search,
       stock_status,
@@ -247,9 +442,16 @@ const getProducts = async (req, res) => {
     } = req.query;
 
     const safePage = Math.max(Number(page) || 1, 1);
+
     const safeLimit = Math.min(Math.max(Number(limit) || 12, 1), 50);
 
     const offset = (safePage - 1) * safeLimit;
+
+    /*
+    |--------------------------------------------------------------------------
+    | PRODUCT WHERE
+    |--------------------------------------------------------------------------
+    */
 
     const productWhere = {
       is_active: true,
@@ -258,6 +460,7 @@ const getProducts = async (req, res) => {
     /*
      * FEATURED
      */
+
     if (featured === "true") {
       productWhere.is_featured = true;
     }
@@ -265,6 +468,7 @@ const getProducts = async (req, res) => {
     /*
      * STOCK STATUS
      */
+
     if (
       stock_status &&
       ["IN_STOCK", "OUT_OF_STOCK", "ON_REQUEST"].includes(stock_status)
@@ -273,12 +477,117 @@ const getProducts = async (req, res) => {
     }
 
     /*
-     * SEARCH
+     * PRICE RANGE
      */
+
+    if (min_price !== undefined || max_price !== undefined) {
+      productWhere.price = {};
+
+      if (min_price !== undefined && min_price !== "") {
+        const min = Number(min_price);
+
+        if (!Number.isNaN(min)) {
+          productWhere.price[Op.gte] = min;
+        }
+      }
+
+      if (max_price !== undefined && max_price !== "") {
+        const max = Number(max_price);
+
+        if (!Number.isNaN(max)) {
+          productWhere.price[Op.lte] = max;
+        }
+      }
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | CATEGORY + COLLECTION
+    |--------------------------------------------------------------------------
+    */
+
+    const productCategoryInclude = {
+      model: ProductCategory,
+
+      as: "product_categories",
+
+      attributes: ["id", "category_id", "collection_id", "is_primary"],
+
+      /*
+       * Required if filtering specifically
+       * by category/collection.
+       *
+       * Also required while searching so
+       * Sequelize can search joined fields.
+       */
+      required: Boolean(category || collection || search?.trim()),
+
+      include: [
+        /*
+         * CATEGORY
+         */
+        {
+          model: Category,
+
+          as: "category",
+
+          attributes: ["uuid", "name", "slug", "parent_id"],
+
+          required: Boolean(category),
+
+          ...(category
+            ? {
+                where: {
+                  slug: category,
+
+                  is_active: true,
+                },
+              }
+            : {}),
+        },
+
+        /*
+         * COLLECTION
+         */
+        {
+          model: Collection,
+
+          as: "collection",
+
+          attributes: ["uuid", "name", "slug", "description", "image_data_uri"],
+
+          required: Boolean(collection),
+
+          ...(collection
+            ? {
+                where: {
+                  slug: collection,
+
+                  is_active: true,
+                },
+              }
+            : {}),
+        },
+      ],
+    };
+
+    /*
+    |--------------------------------------------------------------------------
+    | SEARCH
+    |--------------------------------------------------------------------------
+    |
+    | Product + Category + Collection
+    |
+    */
+
     if (search?.trim()) {
       const searchValue = search.trim();
 
       productWhere[Op.or] = [
+        /*
+         * PRODUCT
+         */
+
         {
           name: {
             [Op.like]: `%${searchValue}%`,
@@ -314,58 +623,47 @@ const getProducts = async (req, res) => {
             [Op.like]: `%${searchValue}%`,
           },
         },
+
+        /*
+         * CATEGORY
+         */
+
+        {
+          "$product_categories.category.name$": {
+            [Op.like]: `%${searchValue}%`,
+          },
+        },
+
+        {
+          "$product_categories.category.slug$": {
+            [Op.like]: `%${searchValue}%`,
+          },
+        },
+
+        /*
+         * COLLECTION
+         */
+
+        {
+          "$product_categories.collection.name$": {
+            [Op.like]: `%${searchValue}%`,
+          },
+        },
+
+        {
+          "$product_categories.collection.slug$": {
+            [Op.like]: `%${searchValue}%`,
+          },
+        },
       ];
     }
 
     /*
-     * PRICE RANGE
-     */
-    if (min_price || max_price) {
-      productWhere.price = {};
+    |--------------------------------------------------------------------------
+    | SORT
+    |--------------------------------------------------------------------------
+    */
 
-      if (min_price !== undefined && min_price !== "") {
-        const min = Number(min_price);
-
-        if (!Number.isNaN(min)) {
-          productWhere.price[Op.gte] = min;
-        }
-      }
-
-      if (max_price !== undefined && max_price !== "") {
-        const max = Number(max_price);
-
-        if (!Number.isNaN(max)) {
-          productWhere.price[Op.lte] = max;
-        }
-      }
-    }
-
-    /*
-     * CATEGORY
-     */
-    const categoryInclude = {
-      model: Category,
-      as: "categories",
-
-      through: {
-        attributes: [],
-      },
-
-      required: false,
-    };
-
-    if (category) {
-      categoryInclude.where = {
-        slug: category,
-        is_active: true,
-      };
-
-      categoryInclude.required = true;
-    }
-
-    /*
-     * SORT
-     */
     let order = [];
 
     switch (sort) {
@@ -397,20 +695,23 @@ const getProducts = async (req, res) => {
     }
 
     /*
-     * PRODUCT QUERY
-     */
+    |--------------------------------------------------------------------------
+    | QUERY
+    |--------------------------------------------------------------------------
+    */
+
     const { count, rows } = await Product.findAndCountAll({
       where: productWhere,
 
       include: [
+        /*
+         * PRIMARY IMAGE
+         */
         {
           model: ProductImage,
+
           as: "images",
 
-          /*
-           * Listing page only needs
-           * the primary image.
-           */
           where: {
             is_primary: true,
           },
@@ -418,12 +719,27 @@ const getProducts = async (req, res) => {
           required: false,
         },
 
-        categoryInclude,
+        /*
+         * CATEGORY /
+         * COLLECTION
+         */
+        productCategoryInclude,
       ],
+
+      /*
+       * IMPORTANT
+       *
+       * Needed because we're searching
+       * nested joined model fields such as:
+       *
+       * $product_categories.collection.name$
+       */
+      subQuery: false,
 
       distinct: true,
 
       limit: safeLimit,
+
       offset,
 
       order,
@@ -436,8 +752,11 @@ const getProducts = async (req, res) => {
 
       pagination: {
         page: safePage,
+
         limit: safeLimit,
+
         total: count,
+
         total_pages: Math.ceil(count / safeLimit),
       },
     });
@@ -446,6 +765,7 @@ const getProducts = async (req, res) => {
 
     return res.status(500).json({
       success: false,
+
       message: "Unable to fetch products",
     });
   }
@@ -473,17 +793,51 @@ const getProductBySlug = async (req, res) => {
         },
 
         {
-          model: Category,
-          as: "categories",
+          model: ProductCategory,
+          as: "product_categories",
+
           required: false,
 
-          through: {
-            attributes: [],
-          },
+          attributes: ["id", "category_id", "collection_id", "is_primary"],
+
+          include: [
+            {
+              model: Category,
+              as: "category",
+
+              required: false,
+
+              attributes: ["uuid", "name", "slug", "parent_id"],
+            },
+
+            {
+              model: Collection,
+              as: "collection",
+
+              required: false,
+
+              attributes: [
+                "uuid",
+                "name",
+                "slug",
+                "description",
+                "image_data_uri",
+              ],
+            },
+          ],
         },
       ],
 
-      order: [[{ model: ProductImage, as: "images" }, "sort_order", "ASC"]],
+      order: [
+        [
+          {
+            model: ProductImage,
+            as: "images",
+          },
+          "sort_order",
+          "ASC",
+        ],
+      ],
     });
 
     if (!product) {
@@ -523,10 +877,16 @@ const updateProduct = async (req, res) => {
       short_description,
       description,
       material,
+      metal_color,
       price,
+      compare_at_price,
+      weight_grams,
+      stock_status,
       is_featured,
       is_active,
-      category_uuids,
+
+      category_collections,
+
       images,
     } = req.body;
 
@@ -534,6 +894,7 @@ const updateProduct = async (req, res) => {
       where: {
         uuid,
       },
+
       transaction,
     });
 
@@ -545,6 +906,12 @@ const updateProduct = async (req, res) => {
         message: "Product not found",
       });
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | PRODUCT BASIC DATA
+    |--------------------------------------------------------------------------
+    */
 
     if (name !== undefined) {
       if (!name?.trim()) {
@@ -563,15 +930,23 @@ const updateProduct = async (req, res) => {
       const duplicate = await Product.findOne({
         where: {
           slug: newSlug,
+
           id: {
             [Op.ne]: product.id,
           },
         },
+
         transaction,
       });
 
       product.slug = duplicate ? `${newSlug}-${Date.now()}` : newSlug;
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | SKU
+    |--------------------------------------------------------------------------
+    */
 
     if (sku !== undefined) {
       const normalizedSku = sku?.trim() || null;
@@ -580,10 +955,12 @@ const updateProduct = async (req, res) => {
         const existingSku = await Product.findOne({
           where: {
             sku: normalizedSku,
+
             id: {
               [Op.ne]: product.id,
             },
           },
+
           transaction,
         });
 
@@ -600,6 +977,12 @@ const updateProduct = async (req, res) => {
       product.sku = normalizedSku;
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | TEXT FIELDS
+    |--------------------------------------------------------------------------
+    */
+
     if (short_description !== undefined) {
       product.short_description = short_description?.trim() || null;
     }
@@ -612,20 +995,18 @@ const updateProduct = async (req, res) => {
       product.material = material?.trim() || null;
     }
 
-    if (price !== undefined) {
-      product.price = price ?? null;
-    }
-
-    if (is_featured !== undefined) {
-      product.is_featured = Boolean(is_featured);
-    }
-
-    if (is_active !== undefined) {
-      product.is_active = Boolean(is_active);
-    }
-
     if (metal_color !== undefined) {
       product.metal_color = metal_color?.trim() || null;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | PRICE / WEIGHT
+    |--------------------------------------------------------------------------
+    */
+
+    if (price !== undefined) {
+      product.price = price ?? null;
     }
 
     if (compare_at_price !== undefined) {
@@ -635,6 +1016,26 @@ const updateProduct = async (req, res) => {
     if (weight_grams !== undefined) {
       product.weight_grams = weight_grams ?? null;
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | FEATURED / ACTIVE
+    |--------------------------------------------------------------------------
+    */
+
+    if (is_featured !== undefined) {
+      product.is_featured = Boolean(is_featured);
+    }
+
+    if (is_active !== undefined) {
+      product.is_active = Boolean(is_active);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | STOCK STATUS
+    |--------------------------------------------------------------------------
+    */
 
     if (stock_status !== undefined) {
       const allowedStatuses = ["IN_STOCK", "OUT_OF_STOCK", "ON_REQUEST"];
@@ -658,29 +1059,73 @@ const updateProduct = async (req, res) => {
     });
 
     /*
-     * REPLACE CATEGORIES
-     */
+    |--------------------------------------------------------------------------
+    | REPLACE CATEGORY + COLLECTION MAPPINGS
+    |--------------------------------------------------------------------------
+    */
 
-    if (category_uuids !== undefined) {
-      if (!Array.isArray(category_uuids)) {
+    if (category_collections !== undefined) {
+      if (!Array.isArray(category_collections)) {
         await transaction.rollback();
 
         return res.status(400).json({
           success: false,
-          message: "category_uuids must be an array",
+          message: "category_collections must be an array",
         });
       }
 
-      const categories = await Category.findAll({
-        where: {
-          uuid: {
-            [Op.in]: category_uuids,
-          },
-        },
-        transaction,
-      });
+      /*
+       * Validate payload structure.
+       */
+      for (const item of category_collections) {
+        if (!item.category_uuid) {
+          await transaction.rollback();
 
-      if (categories.length !== category_uuids.length) {
+          return res.status(400).json({
+            success: false,
+            message: "category_uuid is required",
+          });
+        }
+
+        if (
+          item.collection_uuids !== undefined &&
+          !Array.isArray(item.collection_uuids)
+        ) {
+          await transaction.rollback();
+
+          return res.status(400).json({
+            success: false,
+            message: "collection_uuids must be an array",
+          });
+        }
+      }
+
+      /*
+       * Unique category UUIDs.
+       */
+      const categoryUuids = [
+        ...new Set(category_collections.map((item) => item.category_uuid)),
+      ];
+
+      /*
+       * Get actual category records.
+       */
+      const categories =
+        categoryUuids.length > 0
+          ? await Category.findAll({
+              where: {
+                uuid: {
+                  [Op.in]: categoryUuids,
+                },
+
+                is_active: true,
+              },
+
+              transaction,
+            })
+          : [];
+
+      if (categories.length !== categoryUuids.length) {
         await transaction.rollback();
 
         return res.status(400).json({
@@ -689,29 +1134,128 @@ const updateProduct = async (req, res) => {
         });
       }
 
+      /*
+       * Unique collection UUIDs from
+       * every category.
+       */
+      const collectionUuids = [
+        ...new Set(
+          category_collections.flatMap((item) => item.collection_uuids || []),
+        ),
+      ];
+
+      /*
+       * Get actual collection records.
+       */
+      const collections =
+        collectionUuids.length > 0
+          ? await Collection.findAll({
+              where: {
+                uuid: {
+                  [Op.in]: collectionUuids,
+                },
+
+                is_active: true,
+              },
+
+              transaction,
+            })
+          : [];
+
+      if (collections.length !== collectionUuids.length) {
+        await transaction.rollback();
+
+        return res.status(400).json({
+          success: false,
+          message: "One or more collections are invalid",
+        });
+      }
+
+      /*
+       * UUID -> DB ID maps.
+       */
+      const categoryMap = new Map(
+        categories.map((category) => [category.uuid, category.id]),
+      );
+
+      const collectionMap = new Map(
+        collections.map((collection) => [collection.uuid, collection.id]),
+      );
+
+      /*
+       * Remove old mapping rows.
+       *
+       * Since this is a junction table,
+       * force:true avoids old soft-deleted
+       * combinations causing duplicate issues.
+       */
       await ProductCategory.destroy({
         where: {
           product_id: product.id,
         },
+
+        force: true,
+
         transaction,
       });
 
-      if (categories.length > 0) {
-        await ProductCategory.bulkCreate(
-          categories.map((category) => ({
+      const productCategoryRows = [];
+
+      /*
+       * Recreate category + collection mappings.
+       */
+      for (const item of category_collections) {
+        const categoryId = categoryMap.get(item.category_uuid);
+
+        const selectedCollections = [...new Set(item.collection_uuids || [])];
+
+        /*
+         * Category selected with
+         * no collection.
+         */
+        if (selectedCollections.length === 0) {
+          productCategoryRows.push({
             product_id: product.id,
-            category_id: category.id,
-          })),
-          {
-            transaction,
-          },
-        );
+
+            category_id: categoryId,
+
+            collection_id: null,
+
+            is_primary: false,
+          });
+
+          continue;
+        }
+
+        /*
+         * Category selected with
+         * multiple collections.
+         */
+        for (const collectionUuid of selectedCollections) {
+          productCategoryRows.push({
+            product_id: product.id,
+
+            category_id: categoryId,
+
+            collection_id: collectionMap.get(collectionUuid),
+
+            is_primary: false,
+          });
+        }
+      }
+
+      if (productCategoryRows.length > 0) {
+        await ProductCategory.bulkCreate(productCategoryRows, {
+          transaction,
+        });
       }
     }
 
     /*
-     * REPLACE IMAGES
-     */
+    |--------------------------------------------------------------------------
+    | REPLACE IMAGES
+    |--------------------------------------------------------------------------
+    */
 
     if (images !== undefined) {
       if (!Array.isArray(images)) {
@@ -743,23 +1287,37 @@ const updateProduct = async (req, res) => {
         }
       }
 
+      /*
+       * Remove old images.
+       */
       await ProductImage.destroy({
         where: {
           product_id: product.id,
         },
+
+        force: true,
+
         transaction,
       });
 
+      /*
+       * Add new images.
+       */
       if (images.length > 0) {
         await ProductImage.bulkCreate(
           images.map((image, index) => ({
             product_id: product.id,
+
             data_uri: image.data_uri,
+
+            sort_order: image.sort_order ?? index,
+
             is_primary:
               image.is_primary !== undefined
                 ? Boolean(image.is_primary)
                 : index === 0,
           })),
+
           {
             transaction,
           },
@@ -767,32 +1325,73 @@ const updateProduct = async (req, res) => {
       }
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | COMMIT
+    |--------------------------------------------------------------------------
+    */
+
     await transaction.commit();
+
+    /*
+    |--------------------------------------------------------------------------
+    | FETCH UPDATED PRODUCT
+    |--------------------------------------------------------------------------
+    */
 
     const updatedProduct = await Product.findByPk(product.id, {
       include: [
         {
           model: ProductImage,
+
           as: "images",
         },
 
         {
-          model: Category,
-          as: "categories",
-          through: {
-            attributes: [],
-          },
+          model: ProductCategory,
+
+          as: "product_categories",
+
+          attributes: ["id", "category_id", "collection_id", "is_primary"],
+
+          include: [
+            {
+              model: Category,
+
+              as: "category",
+
+              attributes: ["uuid", "name", "slug", "parent_id"],
+            },
+
+            {
+              model: Collection,
+
+              as: "collection",
+
+              attributes: ["uuid", "name", "slug"],
+
+              required: false,
+            },
+          ],
         },
       ],
     });
 
     return res.status(200).json({
       success: true,
+
       message: "Product updated successfully",
+
       data: updatedProduct,
     });
   } catch (error) {
-    await transaction.rollback();
+    /*
+     * Avoid rollback error if transaction
+     * was already committed.
+     */
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
 
     console.error("Update product error:", error);
 

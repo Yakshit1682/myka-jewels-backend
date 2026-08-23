@@ -10,6 +10,13 @@ const ProductImage = sequelize.define(
       autoIncrement: true,
     },
 
+    uuid: {
+      type: DataTypes.UUID,
+      allowNull: false,
+      unique: true,
+      defaultValue: DataTypes.UUIDV4,
+    },
+
     product_id: {
       type: DataTypes.BIGINT.UNSIGNED,
       allowNull: false,
@@ -23,7 +30,11 @@ const ProductImage = sequelize.define(
     sort_order: {
       type: DataTypes.INTEGER,
       allowNull: false,
-      defaultValue: 0,
+      defaultValue: 1,
+      validate: {
+        min: 1,
+        max: 4,
+      },
     },
 
     is_primary: {
@@ -37,6 +48,9 @@ const ProductImage = sequelize.define(
     timestamps: true,
     createdAt: "created_at",
     updatedAt: "updated_at",
+    paranoid: true,
+    deletedAt: "deleted_at",
+    underscored: true,
   },
 );
 

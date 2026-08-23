@@ -13,6 +13,9 @@ const adminContactRoutes = require("./routes/adminContact.routes");
 const adminUserRoutes = require("./routes/adminUser.routes");
 const adminDashboardRoutes = require("./routes/adminDashboard.routes");
 const adminSetupRoutes = require("./routes/adminSetup.routes");
+const adminCollectionsRoutes = require("./routes/adminCollections.routes");
+const homeBannerRoutes = require("./routes/homeBanner.routes");
+const collectionsRoutes = require("./routes/collection.routes");
 
 const errorHandler = require("./middleware/error.middleware");
 
@@ -28,8 +31,15 @@ app.use(helmet());
 
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: true,
     credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-API-KEY",
+      "ngrok-skip-browser-warning",
+    ],
   }),
 );
 
@@ -57,6 +67,8 @@ app.get("/api/v1/health", (req, res) => {
   });
 });
 
+app.use("/api/v1", homeBannerRoutes);
+
 /*
  * AUTH
  */
@@ -78,6 +90,7 @@ app.use("/api/v1/contact", contactLimiter, contactRoutes);
  */
 
 app.use("/api/v1/wishlist", wishlistRoutes);
+app.use("/api/v1/collections", collectionsRoutes);
 
 app.use("/api/v1/inquiries", inquiryLimiter, inquiryRoutes);
 
@@ -94,6 +107,8 @@ app.use("/api/v1/admin/users", adminUserRoutes);
 app.use("/api/v1/admin/dashboard", adminDashboardRoutes);
 
 app.use("/api/v1/admin-setup", adminSetupRoutes);
+
+app.use("/api/v1/admin/collections", adminCollectionsRoutes);
 
 /*
  * 404
